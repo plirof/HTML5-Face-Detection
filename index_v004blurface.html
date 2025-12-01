@@ -1,4 +1,12 @@
 <!DOCTYPE html>
+<!--
+Optional quick tweaks
+
+Stronger blur → change small.width = 10 to 6 or 4
+Faster (skip 2× scale) → remove 2.0 from the scales array
+Even more sensitive → lower interval to 1 and min_neighbors to 0
+
+-->  
 <html>
 <head>
   <meta charset="utf-8">
@@ -117,51 +125,98 @@ function enhanceContrast(imgData) {
 
 window.startBlur = function() {
   if (!originalImageData) return;
-  
-  // Start with the original image
-  let enhancedData = enhanceContrast(originalImageData); // New: Enhance before detect
+
+  // 1. Draw the clean original image
   ctx.putImageData(originalImageData, 0, 0);
-  
-  // Tuned params: Lower interval for denser scan, lower min_neighbors for sensitivity, add min_size for small faces
-  let faces = ccv.detect_objects({
-    canvas: (canvas.width > 640 ? ccv.pre(canvas) : canvas),
-    cascade: cascade,
-    interval: 2,      // Was 5; lower = more thorough but slower
-    min_neighbors: 1, // Was 3; lower = catches more (test 2 if too many false positives)
-    min_size: [20, 20] // New: Ignore anything smaller than 20x20px
+
+  // 2. Multi-scale detection
+  const scales = [1, 1.5, 2.0];           // Try original size + 1.5× + 2× upscaled
+  let allFaces = [];
+
+  scales.forEach(scale => {
+    let detectCanvas;
+    let detectCtx;
+
+    if (scale === 1) {
+      // Use the main canvas directly (fastest)
+      detectCanvas = canvas;
+    } else {
+      // Create temporary upscaled canvas
+      detectCanvas = document.createElement('canvas');
+      detectCtx = detectCanvas.getContext('2d');
+      detectCanvas.width  = canvas.width  * scale;
+      detectCanvas.height = canvas.height * scale;
+      detectCtx.imageSmoothingEnabled = true;
+      detectCtx.drawImage(canvas, 0, 0, detectCanvas.width, detectCanvas.height);
+    }
+
+    const facesAtThisScale = ccv.detect_objects({
+      canvas        : detectCanvas,
+      cascade       : cascade,
+      interval      : Math.max(1, Math.round(3 / scale)), // denser on larger scales
+      min_neighbors : 1,
+      min_size      : [Math.round(20 * scale), Math.round(20 * scale)]
+    });
+
+    // Scale coordinates back to original image size
+    facesAtThisScale.forEach(face => {
+      face.x      /= scale;
+      face.y      /= scale;
+      face.width  /= scale;
+      face.height /= scale;
+      face.scale  = scale;        // optional: keep track of which scale found it
+      allFaces.push(face);
+    });
   });
-  
-  console.log(`Detected ${faces.length} faces`); // Debug: Check console to see if more are caught
-  
-  // Rest unchanged: Apply pixelation to each
-  faces.forEach(face => {
-    let x = face.x;
-    let y = face.y;
-    let w = face.width;
-    let h = face.height;
-    
-    x -= w * 0.1; y -= h * 0.1; w *= 1.2; h *= 1.2;
-    
-    let tempCanvas = document.createElement('canvas');
-    let tempCtx = tempCanvas.getContext('2d');
-    tempCanvas.width = w;
+
+  // 3. Remove duplicate/overlapping detections
+  allFaces.sort((a, b) => (b.confidence || 0) - (a.confidence || 0));
+
+  const uniqueFaces = [];
+  const tolerance = 30; // pixels – adjust if needed
+
+  for (const face of allFaces) {
+    const alreadyCovered = uniqueFaces.some(f => {
+      const dx = face.x + face.width/2  - (f.x + f.width/2);
+      const dy = face.y + face.height/2 - (f.y + f.height/2);
+      return Math.sqrt(dx*dx + dy*dy) < tolerance;
+    });
+    if (!alreadyCovered) uniqueFaces.push(face);
+  }
+
+  console.log(`Final detected faces: ${uniqueFaces.length} (from ${allFaces.length} raw)`);
+
+  // 4. Apply pixelation blur to every unique face
+  uniqueFaces.forEach(face => {
+    let x = face.x - face.width  * 0.1;
+    let y = face.y - face.height * 0.1;
+    let w = face.width  * 1.2;
+    let h = face.height * 1.2;
+
+    // Clamp to image bounds
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > canvas.width)  w = canvas.width  - x;
+    if (y + h > canvas.height) h = canvas.height - y;
+
+    const tempCanvas = document.createElement('canvas');
+    const tctx = tempCanvas.getContext('2d');
+    tempCanvas.width  = w;
     tempCanvas.height = h;
-    
-    tempCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
-    
-    let smallCanvas = document.createElement('canvas');
-    let smallCtx = smallCanvas.getContext('2d');
-    smallCanvas.width = 10;
-    smallCanvas.height = 10;
-    smallCtx.drawImage(tempCanvas, 0, 0, 10, 10);
-    
+    tctx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+
+    const small = document.createElement('canvas');
+    small.width = 10;   // ← change this number for stronger/weaker blur
+    small.height = 10;
+    const sctx = small.getContext('2d');
+    sctx.drawImage(tempCanvas, 0, 0, 10, 10);
+
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(smallCanvas, x, y, w, h);
+    ctx.drawImage(small, x, y, w, h);
   });
-  
+
   ctx.imageSmoothingEnabled = true;
 };
-
     // Very fast box blur (good enough for this demo)
     function boxBlur(imgData, w, h, radius) {
       const data = imgData.data;
