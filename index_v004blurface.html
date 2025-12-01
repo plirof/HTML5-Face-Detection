@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>HTML5 Face Detection + Blur (with file upload)</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; background:#222; color:#fff; }
+    #container { position:relative; display:inline-block; margin:20px; }
+    canvas, img, video { max-width:90vw; max-height:80vh; }
+    #controls { margin:20px; }
+    button, input { padding:10px 20px; font-size:16px; margin:5px; }
+  </style>
+</head>
+<body>
+  <h1>HTML5 Face Detection + Blur</h1>
+
+  <div id="controls">
+    <input type="file" id="fileInput" accept="image/*">
+    <button onclick="startBlur()">Blur Faces</button>
+    <button onclick="startNormal()">Show Original</button>
+    <button onclick="download()">Download Blurred Image</button>
+  </div>
+
+  <div id="container">
+    <video id="video" autoplay style="display:none;"></video>
+    <img id="photo" style="display:none;">
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <!-- Original libraries from the repo -->
+  <script src="scripts/face.js"></script>
+  <script src="scripts/ccv.js"></script>
+
+  <script>
+    const video   = document.getElementById('video');
+    const canvas  = document.getElementById('canvas');
+    const ctx     = canvas.getContext('2d');
+    const photo   = document.getElementById('photo');
+    const fileInput = document.getElementById('fileInput');
+
+    let currentSource = null;   // 'video' or 'photo'
+    let originalImageData = null;
+
+    // Load image from file input
+    fileInput.addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      photo.src = url;
+      photo.onload = () => {
+        currentSource = 'photo';
+        canvas.width = photo.naturalWidth;
+        canvas.height = photo.naturalHeight;
+        canvas.style.display = 'block';
+        photo.style.display = 'block';
+        video.style.display = 'none';
+        drawOriginal();
+      };
+    });
+
+    function drawOriginal() {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      ctx.drawImage(photo, 0, 0);
+      originalImageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+    }
+
+    window.startNormal = function() {
+      if (currentSource === 'photo') drawOriginal();
+    };
+
+window.startBlur = function() {
+  if (!originalImageData) return;
+  
+  // Detect and draw original (same as above)
+  let faces = ccv.detect_objects({
+    canvas: (canvas.width > 640 ? ccv.pre(canvas) : canvas),
+    cascade: cascade,
+    interval: 5,
+    min_neighbors: 3
+  });
+  
+  ctx.putImageData(originalImageData, 0, 0);
+  
+  faces.forEach(face => {
+    let x = face.x - face.width * 0.1;
+    let y = face.y - face.height * 0.1;
+    let w = face.width * 1.2;
+    let h = face.height * 1.2;
+    
+    // Extract face region (full RGBA)
+    let faceData = ctx.getImageData(x, y, w, h);
+    
+    // Apply Gaussian blur (simple 1D kernel; radius 5 for noticeable effect)
+    gaussianBlur(faceData, w, h, 5);
+    
+    // Put back
+    ctx.putImageData(faceData, x, y);
+  });
+};
+
+function enhanceContrast(imgData) {
+  // Simple contrast boost using Canvas filter (works in modern browsers)
+  // For older support, implement pixel-level adjustment
+  let tempCanvas = document.createElement('canvas');
+  let tempCtx = tempCanvas.getContext('2d');
+  tempCanvas.width = imgData.width;
+  tempCanvas.height = imgData.height;
+  tempCtx.putImageData(imgData, 0, 0);
+  
+  // Apply CSS filter for contrast (150% = noticeable boost)
+  tempCtx.filter = 'contrast(1.5) brightness(1.1)';
+  tempCtx.drawImage(tempCanvas, 0, 0);
+  
+  return tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
+}
+
+
+window.startBlur = function() {
+  if (!originalImageData) return;
+  
+  // Start with the original image
+  let enhancedData = enhanceContrast(originalImageData); // New: Enhance before detect
+  ctx.putImageData(originalImageData, 0, 0);
+  
+  // Tuned params: Lower interval for denser scan, lower min_neighbors for sensitivity, add min_size for small faces
+  let faces = ccv.detect_objects({
+    canvas: (canvas.width > 640 ? ccv.pre(canvas) : canvas),
+    cascade: cascade,
+    interval: 2,      // Was 5; lower = more thorough but slower
+    min_neighbors: 1, // Was 3; lower = catches more (test 2 if too many false positives)
+    min_size: [20, 20] // New: Ignore anything smaller than 20x20px
+  });
+  
+  console.log(`Detected ${faces.length} faces`); // Debug: Check console to see if more are caught
+  
+  // Rest unchanged: Apply pixelation to each
+  faces.forEach(face => {
+    let x = face.x;
+    let y = face.y;
+    let w = face.width;
+    let h = face.height;
+    
+    x -= w * 0.1; y -= h * 0.1; w *= 1.2; h *= 1.2;
+    
+    let tempCanvas = document.createElement('canvas');
+    let tempCtx = tempCanvas.getContext('2d');
+    tempCanvas.width = w;
+    tempCanvas.height = h;
+    
+    tempCtx.drawImage(canvas, x, y, w, h, 0, 0, w, h);
+    
+    let smallCanvas = document.createElement('canvas');
+    let smallCtx = smallCanvas.getContext('2d');
+    smallCanvas.width = 10;
+    smallCanvas.height = 10;
+    smallCtx.drawImage(tempCanvas, 0, 0, 10, 10);
+    
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(smallCanvas, x, y, w, h);
+  });
+  
+  ctx.imageSmoothingEnabled = true;
+};
+
+    // Very fast box blur (good enough for this demo)
+    function boxBlur(imgData, w, h, radius) {
+      const data = imgData.data;
+      const temp = new Uint8ClampedArray(data);
+      const r = radius;
+
+      // horizontal pass
+      for (let y=0; y<h; y++) {
+        for (let x=0; x<w; x++) {
+          let sumR=0, sumG=0, sumB=0, count=0;
+          for (let i=-r; i<=r; i++) {
+            let px = x+i;
+            if (px<0 || px>=w) continue;
+            let idx = (y*w + px)*4;
+            sumR += temp[idx];   sumG += temp[idx+1];   sumB += temp[idx+2];
+            count++;
+          }
+          let idx = (y*w + x)*4;
+          data[idx]   = sumR/count;
+          data[idx+1] = sumG/count;
+          data[idx+2] = sumB/count;
+        }
+      }
+      // vertical pass (reuse data)
+      for (let y=0; y<h; y++) {
+        for (let x=0; x<w; x++) {
+          let sumR=0, sumG=0, sumB=0, count=0;
+          for (let i=-r; i<=r; i++) {
+            let py = y+i;
+            if (py<0 || py>=h) continue;
+            let idx = (py*w + x)*4;
+            sumR += data[idx];   sumG += data[idx+1];   sumB += data[idx+2];
+            count++;
+          }
+          let idx = (y*w + x)*4;
+          data[idx]   = sumR/count;
+          data[idx+1] = sumG/count;
+          data[idx+2] = sumB/count;
+        }
+      }
+      return imgData;
+    }
+
+    // Download button
+    window.download = function() {
+      const link = document.createElement('a');
+      link.download = 'faces-blurred.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    };
+  </script>
+</body>
+</html>
